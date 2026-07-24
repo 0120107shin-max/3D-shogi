@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>漆黒の3D将棋 - Dark Shogi 3D</title>
+  
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Noto+Serif+JP:wght@600;900&family=Shippori+Mincho:wght@700;800&family=Yuji+Syuku&display=swap" rel="stylesheet">
+
+  
+  <!-- CSS -->
+  <link rel="stylesheet" href="styles.css">
+  
+  <!-- External Libraries -->
+  <!-- Three.js for 3D Graphics -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <!-- OrbitControls for Three.js -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <!-- PeerJS for WebRTC P2P Multiplayer -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+</head>
+<body>
+  <!-- 3D Canvas Container -->
+  <div id="canvas-container"></div>
+
+  <!-- UI Overlay Layer -->
+  <div id="ui-layer">
+    <!-- Header Controls -->
+    <header class="app-header">
+      <div class="logo">
+        <span class="kanji">漆黒</span>
+        <span class="sub">3D SHOGI</span>
+      </div>
+      <div class="header-actions">
+        <button id="btn-camera-cycle" class="btn btn-icon" title="視点切替（盤をダブルクリックでも可）">🧭 視点切替</button>
+        <button id="btn-camera-reset" class="btn btn-icon" title="視点復元">🎥 視点復元</button>
+        <button id="btn-camera-flip" class="btn btn-icon" title="視点反転">🔄 先後反転</button>
+        <button id="btn-new-game" class="btn btn-primary">➕ 対局設定</button>
+      </div>
+    </header>
+
+    <!-- Player Panels -->
+    <div id="gote-panel" class="player-card gote">
+      <div class="player-info">
+        <span class="player-label">後手 (上手)</span>
+        <span id="gote-name" class="player-name">プレイヤー / CPU</span>
+      </div>
+      <div class="timer-box">
+        <div id="gote-main-time" class="time-display">05:00</div>
+        <div id="gote-byoyomi" class="byoyomi-display">秒読み 20秒</div>
+      </div>
+    </div>
+
+    <div id="sente-panel" class="player-card sente active">
+      <div class="player-info">
+        <span class="player-label">先手 (下手)</span>
+        <span id="sente-name" class="player-name">プレイヤー</span>
+      </div>
+      <div class="timer-box">
+        <div id="sente-main-time" class="time-display">05:00</div>
+        <div id="sente-byoyomi" class="byoyomi-display">秒読み 20秒</div>
+      </div>
+    </div>
+
+    <!-- Move Indicator / Status Bar -->
+    <div id="status-bar" class="status-bar">
+      <span id="turn-indicator">▲ 先手番（5分＋20秒）</span>
+    </div>
+
+    <!-- Sidebar / Kifu & Controls -->
+    <aside class="sidebar" id="sidebar">
+      <button id="btn-sidebar-toggle" class="sidebar-toggle-btn" title="サイドバーを閉じる">»</button>
+      <div class="sidebar-body">
+        <div class="sidebar-header">
+          <h3>対局履歴 (棋譜)</h3>
+          <button id="btn-kifu-history" class="btn btn-icon-sm" title="保存された過去の棋譜を見る">📚 棋譜一覧</button>
+        </div>
+        <div id="kifu-list" class="kifu-container">
+          <div class="kifu-entry placeholder">対局を開始してください</div>
+        </div>
+        <div class="sidebar-footer">
+          <button id="btn-resign" class="btn btn-danger" disabled>🏳️ 投了</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Modals (Outside #ui-layer grid for full window overlay & clean pointer events) -->
+  <!-- Modal: Game Setup -->
+  <div id="modal-setup" class="modal active">
+    <div class="modal-content glass-panel">
+      <h2>対局設定</h2>
+
+      <!-- Mode Select -->
+      <div class="form-group">
+        <label>対局モード</label>
+        <div class="button-group" id="mode-selector">
+          <button class="btn btn-option active" data-mode="local">対人 (ローカル)</button>
+          <button class="btn btn-option" data-mode="cpu">対CPU (AI)</button>
+          <button class="btn btn-option" data-mode="p2p">オンライン (P2P)</button>
+        </div>
+      </div>
+
+      <!-- CPU Difficulty (Hidden unless CPU selected) -->
+      <div class="form-group mode-option cpu-only hidden">
+        <label>CPU 難易度</label>
+        <select id="cpu-level" class="input-select">
+          <option value="1">初級 (Lv.1)</option>
+          <option value="2" selected>中級 (Lv.2)</option>
+          <option value="3">上級 (Lv.3)</option>
+        </select>
+      </div>
+
+      <!-- Player Side Select (Hidden unless CPU selected) -->
+      <div class="form-group mode-option cpu-only hidden">
+        <label>あなたの手番</label>
+        <div class="button-group" id="side-selector">
+          <button class="btn btn-option active" data-side="sente">先手 (下手)</button>
+          <button class="btn btn-option" data-side="gote">後手 (上手)</button>
+        </div>
+      </div>
+
+      <!-- P2P Sub Options (Hidden unless P2P selected) -->
+      <div class="form-group mode-option p2p-only hidden">
+        <label>オンラインP2P接続</label>
+        <div class="p2p-flex">
+          <button id="btn-p2p-host" class="btn btn-secondary">部屋を作る (ホスト)</button>
+          <button id="btn-p2p-join-modal" class="btn btn-secondary">部屋に入る (参加)</button>
+        </div>
+      </div>
+
+      <!-- Handicap / Koma-ochi -->
+      <div class="form-group">
+        <label>駒落ちハンデ (上手の手合い)</label>
+        <select id="handicap-select" class="input-select">
+          <option value="hirate" selected>平手 (ハンデなし)</option>
+          <option value="kyo">香落ち</option>
+          <option value="kaku">角落ち</option>
+          <option value="hisha">飛車落ち</option>
+          <option value="hishakyo">飛香落ち</option>
+          <option value="nimai">二枚落ち (飛角)</option>
+          <option value="yonmai">四枚落ち (飛角香香)</option>
+          <option value="rokumai">六枚落ち</option>
+          <option value="hachimai">八枚落ち</option>
+          <option value="jumai">十枚落ち</option>
+        </select>
+      </div>
+
+      <!-- Time Controls -->
+      <div class="form-group">
+        <label>持ち時間ルール</label>
+        <select id="time-preset-select" class="input-select">
+          <option value="standard" selected>標準: 5分 + 秒読み20秒 (デフォルト)</option>
+          <option value="hayazashi">超早指し: 1分 + 秒読み10秒</option>
+          <option value="jikkuri">じっくり: 10分 + 秒読み30秒</option>
+          <option value="custom">非対称時間ハンデ (カスタム)</option>
+        </select>
+      </div>
+
+      <!-- Custom Time Settings (Asymmetric Handicap) -->
+      <div id="custom-time-box" class="custom-time-grid hidden">
+        <div class="time-sub-group">
+          <h4>先手 / 下手 時間</h4>
+          <div class="flex-row">
+            <label>持ち時間(分): <input type="number" id="sente-min" value="5" min="0" max="60"></label>
+            <label>秒読み(秒): <input type="number" id="sente-sec" value="20" min="0" max="120"></label>
+          </div>
+        </div>
+        <div class="time-sub-group">
+          <h4>後手 / 上手 時間</h4>
+          <div class="flex-row">
+            <label>持ち時間(分): <input type="number" id="gote-min" value="5" min="0" max="60"></label>
+            <label>秒読み(秒): <input type="number" id="gote-sec" value="20" min="0" max="120"></label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Submit Button -->
+      <div class="modal-actions">
+        <button id="btn-setup-kifu-history" class="btn btn-secondary btn-link-left">📚 棋譜一覧</button>
+        <button id="btn-setup-cancel" class="btn btn-secondary hidden">← 戻る（対局を続ける）</button>
+        <button id="btn-start-game" class="btn btn-gold btn-large">対局開始</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: P2P Matchmaking / Room ID -->
+  <div id="modal-p2p" class="modal">
+    <div class="modal-content glass-panel">
+      <h3>P2P オンライン対戦</h3>
+      <div id="p2p-status-container">
+        <p id="p2p-status-text">PeerJS に接続中...</p>
+        
+        <!-- Host Room Info -->
+        <div id="p2p-host-box" class="p2p-box hidden">
+          <p>あなたの対戦ID (相手に共有してください):</p>
+          <div class="peer-id-container">
+            <input type="text" id="my-peer-id" readonly class="input-text">
+            <button id="btn-copy-peer-id" class="btn btn-secondary">コピー</button>
+          </div>
+          <p class="sub-text">対戦相手の接続を待っています...</p>
+        </div>
+
+        <!-- Join Room Info -->
+        <div id="p2p-join-box" class="p2p-box hidden">
+          <p>ホストの対戦IDを入力してください:</p>
+          <input type="text" id="target-peer-id" placeholder="ホストのIDを入力" class="input-text">
+          <button id="btn-connect-peer" class="btn btn-primary">接続して対局開始</button>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-close-p2p" class="btn btn-secondary">← 戻る（対局設定へ）</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Game Over Result -->
+  <div id="modal-result" class="modal">
+    <div class="modal-content glass-panel text-center">
+      <h2 id="result-title">対局終了</h2>
+      <p id="result-message">詰みです！先手の勝利。</p>
+      <div class="modal-actions center">
+        <button id="btn-result-close" class="btn btn-secondary">盤面を見る</button>
+        <button id="btn-result-restart" class="btn btn-gold">もう一度遊ぶ</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Nari (Promotion) Choice Dialog -->
+  <div id="modal-nari" class="modal">
+    <div class="modal-content glass-panel text-center compact">
+      <h3>成りますか？</h3>
+      <div class="nari-buttons">
+        <button id="btn-nari-yes" class="btn btn-gold btn-large">成る</button>
+        <button id="btn-nari-no" class="btn btn-secondary btn-large">成らない</button>
+      </div>
+      <div class="modal-actions center">
+        <button id="btn-nari-cancel" class="btn btn-secondary">← 戻る（指し直す）</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Kifu History (保存された過去の棋譜) -->
+  <div id="modal-kifu-history" class="modal">
+    <div class="modal-content glass-panel kifu-history-panel">
+      <h3>保存された棋譜</h3>
+
+      <div id="kifu-history-list-pane">
+        <div id="kifu-history-list" class="kifu-history-list">
+          <div class="kifu-entry placeholder">保存された対局はまだありません</div>
+        </div>
+        <div class="modal-actions">
+          <button id="btn-kifu-history-clear" class="btn btn-danger">全て削除</button>
+          <button id="btn-kifu-history-close" class="btn btn-secondary">閉じる</button>
+        </div>
+      </div>
+
+      <div id="kifu-history-detail-pane" class="hidden">
+        <div id="kifu-history-detail-meta" class="kifu-history-meta"></div>
+        <div id="kifu-history-detail-moves" class="kifu-container kifu-history-moves"></div>
+        <div class="modal-actions">
+          <button id="btn-kifu-detail-delete" class="btn btn-danger">この棋譜を削除</button>
+          <button id="btn-kifu-detail-back" class="btn btn-secondary">← 一覧へ戻る</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  </div>
+
+  <!-- Scripts -->
+  <script type="module" src="js/app.js?v=20260724_sidebar1"></script>
+
+
+</body>
+</html>
+
