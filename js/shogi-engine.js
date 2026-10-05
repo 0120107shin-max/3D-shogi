@@ -25,6 +25,15 @@ export const PIECE_NAMES = {
   TO: 'と', NY: '杏', NK: '圭', NG: '全', UM: '馬', RY: '竜'
 };
 
+export const STARTPOS_SFEN = 'lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b - 1';
+
+const SFEN_CHARS = {
+  FU: 'P', KY: 'L', KE: 'N', GI: 'S', KI: 'G', KA: 'B', HI: 'R', OU: 'K',
+  TO: '+P', NY: '+L', NK: '+N', NG: '+S', UM: '+B', RY: '+R'
+};
+const SFEN_TYPES = { P: 'FU', L: 'KY', N: 'KE', S: 'GI', G: 'KI', B: 'KA', R: 'HI', K: 'OU' };
+const HAND_ORDER = ['HI', 'KA', 'KI', 'GI', 'KE', 'KY', 'FU'];
+
 export class ShogiEngine {
   constructor() {
     this.board = Array(9).fill(null).map(() => Array(9).fill(null));
@@ -37,7 +46,12 @@ export class ShogiEngine {
     this.moveCount = 0;
     this.isGameOver = false;
     this.winner = null;
+    this.isDraw = false;
+    this.gameOverReason = null;
     this.handicap = 'hirate';
+    this.initialSfen = STARTPOS_SFEN;
+    this.snapshots = [];     // 待った用: 各着手前の状態
+    this.positionKeys = [];  // 千日手判定用: 各局面のキー（index = その局面までの手数）
   }
 
   // 初期盤面セットアップ (平手および各種駒落ち)
@@ -92,6 +106,12 @@ export class ShogiEngine {
 
     // 駒落ちは上手（GOTE）が初手
     this.turn = (handicap === 'hirate') ? SENTE : GOTE;
+    this.isDraw = false;
+    this.gameOverReason = null;
+    this.startPly = 0;
+    this.initialSfen = this.toSfen();
+    this.snapshots = [];
+    this.positionKeys = [this.positionKey()];
   }
 
   applyHandicap(handicap) {
@@ -298,6 +318,13 @@ export class ShogiEngine {
   // 指し手の実行
   makeMove(from, to, promote = false, isDrop = false, dropPieceType = null) {
     if (this.isGameOver) return false;
+    if (isDrop) {
+      if (!this.hands[this.turn][dropPieceType] || this.hands[this.turn][dropPieceType] <= 0) return false;
+    } else if (!this.board[from.y][from.x]) {
+      return false;
+    }
+
+    this.snapshots.push(this.captureState());
 
     let moveRecord = {
       turn: this.turn,
@@ -306,17 +333,16 @@ export class ShogiEngine {
       promote,
       isDrop,
       dropPieceType,
-      captured: null
+      pieceType: isDrop ? dropPieceType : this.board[from.y][from.x].type, // 移動前の駒種（KIF表記用）
+      captured: null,
+      givesCheck: false
     };
 
     if (isDrop) {
-      if (this.hands[this.turn][dropPieceType] <= 0) return false;
       this.hands[this.turn][dropPieceType]--;
       this.board[to.y][to.x] = { type: dropPieceType, owner: this.turn };
     } else {
       const piece = this.board[from.y][from.x];
-      if (!piece) return false;
-
       const target = this.board[to.y][to.x];
       if (target) {
         // 王（玉）を直接取った場合はその瞬間に即時勝利！
@@ -327,7 +353,7 @@ export class ShogiEngine {
 
         // 駒を取得して持ち駒に加える（成駒は元の駒に戻す）
         const unpromotedType = this.unpromote(target.type);
-        this.hands[this.turn][unpromotedType]++;
+        if (unpromotedType !== PIECE_TYPES.OU) this.hands[this.turn][unpromotedType]++;
         moveRecord.captured = target.type;
       }
 
@@ -346,19 +372,314 @@ export class ShogiEngine {
     // 王を取ってゲーム終了していない場合、相手手番の合法手有無をチェック
     if (!this.isGameOver) {
       const nextTurn = -this.turn;
+      moveRecord.givesCheck = this.isInCheck(nextTurn);
       // 相手に合法手が1つも無ければ終局（王手中なら詰み、そうでなければ手詰まり）。いずれも着手側の勝ち。
       if (!this.hasAnyLegalMove(nextTurn)) {
         this.isGameOver = true;
         this.winner = this.turn;
-        this.gameOverReason = this.isInCheck(nextTurn) ? '詰み' : '手詰まり';
+        this.gameOverReason = moveRecord.givesCheck ? '詰み' : '手詰まり';
       } else {
         this.turn = nextTurn;
       }
     }
 
+    this.positionKeys.push(this.positionKey());
+    if (!this.isGameOver) this.checkRepetition();
+
     return true;
   }
 
+  // ===== 待った（一手戻し） =====
+
+  captureState() {
+    return {
+      board: this.board.map(row => row.map(c => (c ? { ...c } : null))),
+      hands: { [SENTE]: { ...this.hands[SENTE] }, [GOTE]: { ...this.hands[GOTE] } },
+      turn: this.turn,
+      isGameOver: this.isGameOver,
+      winner: this.winner,
+      isDraw: this.isDraw,
+      gameOverReason: this.gameOverReason
+    };
+  }
+
+  canUndo() {
+    return this.snapshots.length > 0;
+  }
+
+  // 直前の一手を取り消す。終局後でも取り消せる（終局状態も着手前に戻る）。
+  undoMove() {
+    if (!this.canUndo()) return false;
+    const s = this.snapshots.pop();
+    this.board = s.board;
+    this.hands = s.hands;
+    this.turn = s.turn;
+    this.isGameOver = s.isGameOver;
+    this.winner = s.winner;
+    this.isDraw = s.isDraw;
+    this.gameOverReason = s.gameOverReason;
+    this.history.pop();
+    this.positionKeys.pop();
+    this.moveCount--;
+    return true;
+  }
+
+  // 終局を外部から確定させる（投了・時間切れ・宣言など）
+  setGameOver(winner, reason) {
+    this.isGameOver = true;
+    this.winner = winner;
+    this.isDraw = winner === null;
+    this.gameOverReason = reason;
+  }
+
+  // ===== 千日手 =====
+
+  // 同一局面（盤面・持ち駒・手番）が4回現れたら千日手。
+  // その間ずっと一方が王手をかけ続けていた場合は「連続王手の千日手」で王手をかけた側の負け。
+  checkRepetition() {
+    const key = this.positionKeys[this.positionKeys.length - 1];
+    const occ = [];
+    this.positionKeys.forEach((k, i) => { if (k === key) occ.push(i); });
+    if (occ.length < 4) return;
+
+    const startIdx = occ[occ.length - 4];
+    const endIdx = occ[occ.length - 1];
+    // history[i] は positionKeys[i] の局面から指された手
+    const moves = this.history.slice(startIdx, endIdx);
+    for (const side of [SENTE, GOTE]) {
+      const sideMoves = moves.filter(m => m.turn === side);
+      if (sideMoves.length > 0 && sideMoves.every(m => m.givesCheck)) {
+        this.setGameOver(-side, '連続王手の千日手');
+        return;
+      }
+    }
+    this.setGameOver(null, '千日手');
+  }
+
+  // ===== 入玉宣言 (24点法) =====
+
+  // 大駒5点・小駒1点。玉は数えない。
+  static piecePoint(type) {
+    const base = { KA: 5, HI: 5, UM: 5, RY: 5, OU: 0 };
+    return base[type] ?? 1;
+  }
+
+  // 平手の総点数(54点)との差分を、駒落ちで上手が落とした駒の点数として上手に加算する（CSA 24点法 駒落ち規定）
+  missingPointsForHandicap() {
+    let total = 0;
+    for (let y = 0; y < 9; y++) {
+      for (let x = 0; x < 9; x++) {
+        const p = this.board[y][x];
+        if (p) total += ShogiEngine.piecePoint(p.type);
+      }
+    }
+    for (const owner of [SENTE, GOTE]) {
+      for (const [t, c] of Object.entries(this.hands[owner])) total += ShogiEngine.piecePoint(t) * c;
+    }
+    return Math.max(0, 54 - total);
+  }
+
+  // 手番側が入玉宣言できるかを判定する。
+  // 戻り値 { result: 'win' | 'draw' | 'invalid', points, piecesInCamp, reason }
+  evaluateDeclaration(owner = this.turn) {
+    const inCamp = (y) => (owner === SENTE ? y <= 2 : y >= 6);
+    const king = this.findKing(owner);
+    const res = { result: 'invalid', points: 0, piecesInCamp: 0, reason: '' };
+    if (owner !== this.turn) { res.reason = '自分の手番ではありません'; return res; }
+    if (!king || !inCamp(king.y)) { res.reason = '玉が敵陣三段目以内に入っていません'; return res; }
+    if (this.isInCheck(owner)) { res.reason = '王手がかかっています'; return res; }
+
+    let points = 0;
+    let pieces = 0;
+    for (let y = 0; y < 9; y++) {
+      if (!inCamp(y)) continue;
+      for (let x = 0; x < 9; x++) {
+        const p = this.board[y][x];
+        if (p && p.owner === owner && p.type !== PIECE_TYPES.OU) {
+          pieces++;
+          points += ShogiEngine.piecePoint(p.type);
+        }
+      }
+    }
+    for (const [t, c] of Object.entries(this.hands[owner])) points += ShogiEngine.piecePoint(t) * c;
+    if (owner === GOTE && this.handicap !== 'hirate') points += this.missingPointsForHandicap();
+
+    res.points = points;
+    res.piecesInCamp = pieces;
+    if (pieces < 10) { res.reason = `敵陣の駒が10枚未満です（${pieces}枚）`; return res; }
+    if (points >= 31) { res.result = 'win'; return res; }
+    if (points >= 24) { res.result = 'draw'; return res; }
+    res.reason = `点数が24点未満です（${points}点）`;
+    return res;
+  }
+
+  // 入玉宣言を実行する。条件不成立なら宣言しない（false を返す）。
+  declare(owner = this.turn) {
+    if (this.isGameOver) return null;
+    const ev = this.evaluateDeclaration(owner);
+    if (ev.result === 'win') this.setGameOver(owner, '入玉宣言勝ち');
+    else if (ev.result === 'draw') this.setGameOver(null, '持将棋');
+    return ev;
+  }
+
+  // ===== SFEN / USI =====
+
+  toSfen(includeMoveNumber = true) {
+    const rows = [];
+    for (let y = 0; y < 9; y++) {
+      let row = '';
+      let empty = 0;
+      for (let x = 0; x < 9; x++) {
+        const p = this.board[y][x];
+        if (!p) { empty++; continue; }
+        if (empty) { row += empty; empty = 0; }
+        let ch = SFEN_CHARS[p.type];
+        if (p.owner === GOTE) ch = ch.toLowerCase();
+        row += ch;
+      }
+      if (empty) row += empty;
+      rows.push(row);
+    }
+    let hand = '';
+    for (const owner of [SENTE, GOTE]) {
+      for (const t of HAND_ORDER) {
+        const c = this.hands[owner][t];
+        if (!c) continue;
+        const ch = owner === SENTE ? SFEN_CHARS[t] : SFEN_CHARS[t].toLowerCase();
+        hand += (c > 1 ? c : '') + ch;
+      }
+    }
+    const parts = [rows.join('/'), this.turn === SENTE ? 'b' : 'w', hand || '-'];
+    if (includeMoveNumber) parts.push(String((this.startPly || 0) + this.moveCount + 1));
+    return parts.join(' ');
+  }
+
+  positionKey() {
+    return this.toSfen(false);
+  }
+
+  // SFEN 文字列（"sfen" 接頭辞・"startpos" も可）から局面を読み込む
+  loadSfen(sfen, handicap = 'hirate') {
+    let text = sfen.trim();
+    if (text === 'startpos') text = STARTPOS_SFEN;
+    text = text.replace(/^sfen\s+/, '');
+    const [boardPart, turnPart, handPart, plyPart] = text.split(/\s+/);
+    const rows = (boardPart || '').split('/');
+    if (rows.length !== 9) throw new Error('SFEN の盤面が不正です');
+
+    const board = Array(9).fill(null).map(() => Array(9).fill(null));
+    rows.forEach((row, y) => {
+      let x = 0;
+      for (let i = 0; i < row.length; i++) {
+        let ch = row[i];
+        if (/[1-9]/.test(ch)) { x += parseInt(ch, 10); continue; }
+        let promoted = false;
+        if (ch === '+') { promoted = true; ch = row[++i]; }
+        const owner = ch === ch.toUpperCase() ? SENTE : GOTE;
+        let type = SFEN_TYPES[ch.toUpperCase()];
+        if (!type || x > 8) throw new Error('SFEN の盤面が不正です');
+        if (promoted) type = this.promote(type);
+        board[y][x++] = { type, owner };
+      }
+      if (x !== 9) throw new Error('SFEN の盤面が不正です');
+    });
+
+    const hands = {
+      [SENTE]: { FU: 0, KY: 0, KE: 0, GI: 0, KI: 0, KA: 0, HI: 0 },
+      [GOTE]: { FU: 0, KY: 0, KE: 0, GI: 0, KI: 0, KA: 0, HI: 0 }
+    };
+    if (handPart && handPart !== '-') {
+      const re = /(\d*)([PLNSGBRplnsgbr])/g;
+      let m;
+      let consumed = 0;
+      while ((m = re.exec(handPart))) {
+        const owner = m[2] === m[2].toUpperCase() ? SENTE : GOTE;
+        hands[owner][SFEN_TYPES[m[2].toUpperCase()]] += m[1] ? parseInt(m[1], 10) : 1;
+        consumed += m[0].length;
+      }
+      if (consumed !== handPart.length) throw new Error('SFEN の持ち駒が不正です');
+    }
+
+    this.board = board;
+    this.hands = hands;
+    this.turn = turnPart === 'w' ? GOTE : SENTE;
+    this.startPly = Math.max(0, (parseInt(plyPart, 10) || 1) - 1);
+    this.handicap = handicap;
+    this.history = [];
+    this.moveCount = 0;
+    this.isGameOver = false;
+    this.winner = null;
+    this.isDraw = false;
+    this.gameOverReason = null;
+    this.initialSfen = this.toSfen();
+    this.snapshots = [];
+    this.positionKeys = [this.positionKey()];
+  }
+
+  // 内部の指し手 → USI 文字列 ("7g7f", "8h2b+", "P*5e")
+  static moveToUsi(move) {
+    const sq = (p) => `${9 - p.x}${String.fromCharCode(97 + p.y)}`;
+    if (move.isDrop) return `${SFEN_CHARS[move.dropPieceType]}*${sq(move.to)}`;
+    return `${sq(move.from)}${sq(move.to)}${move.promote ? '+' : ''}`;
+  }
+
+  // USI 文字列 → 内部の指し手。形式が不正なら null。
+  static usiToMove(usi) {
+    const parseSq = (f, r) => ({ x: 9 - parseInt(f, 10), y: r.charCodeAt(0) - 97 });
+    let m = /^([PLNSGBR])\*([1-9])([a-i])$/.exec(usi);
+    if (m) return { from: null, to: parseSq(m[2], m[3]), promote: false, isDrop: true, dropPieceType: SFEN_TYPES[m[1]] };
+    m = /^([1-9])([a-i])([1-9])([a-i])(\+?)$/.exec(usi);
+    if (m) return { from: parseSq(m[1], m[2]), to: parseSq(m[3], m[4]), promote: m[5] === '+', isDrop: false, dropPieceType: null };
+    return null;
+  }
+
+  // 現在の手番で指し手が合法か（成り・不成の可否も含めて）厳密に判定する
+  isLegalMove(move) {
+    if (this.isGameOver || !move || !move.to) return false;
+    const { from, to, promote, isDrop, dropPieceType } = move;
+    if (isDrop) {
+      if (promote) return false;
+      return this.getLegalDrops(dropPieceType).some(d => d.y === to.y && d.x === to.x);
+    }
+    if (!from || from.y < 0 || from.y > 8 || from.x < 0 || from.x > 8) return false;
+    const piece = this.board[from.y][from.x];
+    if (!piece || piece.owner !== this.turn) return false;
+    if (!this.getLegalMoves(from.y, from.x).some(m => m.y === to.y && m.x === to.x)) return false;
+    if (promote && !this.canPromote(from.y, to.y, piece.type, piece.owner)) return false;
+    if (!promote && this.mustPromote(to.y, piece.type, piece.owner)) return false;
+    return true;
+  }
+
+  // 手番側の全合法手（成・不成の両方、打ち駒を含む）
+  generateAllLegalMoves() {
+    const owner = this.turn;
+    const moves = [];
+    for (let y = 0; y < 9; y++) {
+      for (let x = 0; x < 9; x++) {
+        const p = this.board[y][x];
+        if (!p || p.owner !== owner) continue;
+        for (const m of this.getLegalMoves(y, x)) {
+          const base = { from: { y, x }, to: { y: m.y, x: m.x }, isDrop: false, dropPieceType: null };
+          if (!this.mustPromote(m.y, p.type, owner)) moves.push({ ...base, promote: false });
+          if (this.canPromote(y, m.y, p.type, owner)) moves.push({ ...base, promote: true });
+        }
+      }
+    }
+    for (const [type, count] of Object.entries(this.hands[owner])) {
+      if (count <= 0) continue;
+      for (const d of this.getLegalDrops(type)) {
+        moves.push({ from: null, to: { y: d.y, x: d.x }, promote: false, isDrop: true, dropPieceType: type });
+      }
+    }
+    return moves;
+  }
+
+  // 現局面を USI の position コマンド文字列で返す（初期局面＋指し手列）
+  toUsiPosition() {
+    const moves = this.history.map(h => ShogiEngine.moveToUsi(h));
+    const base = this.initialSfen === STARTPOS_SFEN ? 'position startpos' : `position sfen ${this.initialSfen}`;
+    return moves.length ? `${base} moves ${moves.join(' ')}` : base;
+  }
 
   promote(type) {
     switch (type) {

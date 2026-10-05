@@ -442,6 +442,15 @@ export class Shogi3DView {
 
           this.scene.add(mesh);
           this.handPieceMeshes.set(`${owner}_${type}`, mesh);
+
+          // 2枚以上ある持ち駒は枚数バッジを表示する
+          if (count > 1) {
+            const badge = this.createCountBadge(count);
+            badge.position.set(baseX + offsetX + 0.26, 0.45, baseZ + offsetZ + 0.26);
+            badge.userData = { isHand: true, pieceType: type, owner };
+            this.scene.add(badge);
+            this.handPieceMeshes.set(`${owner}_${type}_count`, badge);
+          }
           offsetIndex++;
         }
       });
@@ -451,9 +460,76 @@ export class Shogi3DView {
     renderHand(GOTE, -6.2, -3.8); // 後手駒台
   }
 
+  // 持ち駒の枚数バッジ（常にカメラを向くスプライト）
+  createCountBadge(count) {
+    const key = `badge_${count}`;
+    let texture = this.texturesCache.get(key);
+    if (!texture) {
+      const c = document.createElement('canvas');
+      c.width = c.height = 128;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = 'rgba(200, 0, 0, 0.95)';
+      ctx.beginPath();
+      ctx.arc(64, 64, 58, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.lineWidth = 8;
+      ctx.strokeStyle = '#fff3d6';
+      ctx.stroke();
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 72px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(count), 64, 70);
+      texture = new THREE.CanvasTexture(c);
+      this.texturesCache.set(key, texture);
+    }
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false }));
+    sprite.scale.set(0.36, 0.36, 1);
+    sprite.renderOrder = 10;
+    return sprite;
+  }
+
+  // マスを塗る平面マーカー
+  createSquareMarker(pos, color, opacity) {
+    const geo = new THREE.PlaneGeometry(this.squareSize * 0.96, this.squareSize * 0.96);
+    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity, side: THREE.DoubleSide, depthWrite: false });
+    const plane = new THREE.Mesh(geo, mat);
+    plane.rotation.x = -Math.PI / 2;
+    plane.position.copy(this.gridToWorld(pos.y, pos.x, 0.012));
+    plane.raycast = () => {}; // クリック判定の邪魔をしない
+    return plane;
+  }
+
+  // 直前の指し手の移動先マスを薄く塗って示す（null で消去）
+  setLastMove(pos) {
+    if (this.lastMoveMarker) {
+      this.scene.remove(this.lastMoveMarker);
+      this.lastMoveMarker = null;
+    }
+    if (!pos) return;
+    this.lastMoveMarker = this.createSquareMarker(pos, 0xff8c00, 0.5);
+    this.scene.add(this.lastMoveMarker);
+  }
+
+  // 王手されている玉のマスを赤く示す（null で消去）
+  setCheckSquare(pos) {
+    if (this.checkMarker) {
+      this.scene.remove(this.checkMarker);
+      this.checkMarker = null;
+    }
+    if (!pos) return;
+    this.checkMarker = this.createSquareMarker(pos, 0xe00000, 0.55);
+    this.scene.add(this.checkMarker);
+  }
+
   // 移動可能なマスの3Dマーカー（光るリング）を表示
-  showLegalMoveHighlights(moves) {
+  showLegalMoveHighlights(moves, selected = null) {
     this.clearHighlights();
+    if (selected) {
+      const marker = this.createSquareMarker(selected, 0x3fa7ff, 0.45);
+      this.scene.add(marker);
+      this.highlightMarkers.push(marker);
+    }
 
     moves.forEach(m => {
       const geo = new THREE.RingGeometry(0.2, 0.38, 32);
@@ -489,7 +565,8 @@ export class Shogi3DView {
   setCameraPerspective(owner) {
     this.perspective = owner;
     const eps = (owner === SENTE) ? 0.001 : -0.001;
-    this.camera.position.set(0, 15.5, eps);
+    const dist = this.fitCamera();
+    this.camera.position.set(0, dist, eps);
     this.viewIndex = (owner === SENTE) ? 0 : 1;
     if (this.controls) {
       this.controls.target.set(0, 0, 0);
@@ -570,8 +647,76 @@ export class Shogi3DView {
 
   onWindowResize() {
     this.camera.aspect = window.innerWidth / window.innerHeight;
-    this.camera.updateProjectionMatrix();
     this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.setCameraPerspective(this.perspective);
+  }
+
+  // 画面サイズ・UIパネルの配置に合わせて、盤と両方の駒台が収まるカメラ距離を求める。
+  // パネル（プレイヤー情報・棋譜欄・ステータス・再生バー）に隠れない領域を測り、
+  // その領域の中央に盤が来るよう投影をずらす（クリック判定も同じ投影を使うので整合する）。
+  fitCamera() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const tanHalf = Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2));
+    const rect = (sel) => {
+      const el = document.querySelector(sel);
+      if (!el || el.offsetParent === null) return null;
+      const r = el.getBoundingClientRect();
+      return r.width && r.height ? r : null;
+    };
+    let left = 0, right = w, top = 0, bottom = h;
+    const header = rect('.app-header');
+    if (header) top = header.bottom;
+    const status = rect('#status-bar');
+    if (status) bottom = Math.min(bottom, status.top);
+    const replay = rect('#replay-bar');
+    if (replay) bottom = Math.min(bottom, replay.top);
+
+    if (w <= 820) {
+      // スマホ: プレイヤー情報は上、棋譜欄は下
+      for (const sel of ['#gote-panel', '#sente-panel']) {
+        const r = rect(sel);
+        if (r) top = Math.max(top, r.bottom);
+      }
+      const side = rect('#sidebar');
+      if (side) bottom = Math.min(bottom, side.top);
+    } else {
+      // PC: プレイヤー情報は左、棋譜欄は右
+      for (const sel of ['#gote-panel', '#sente-panel']) {
+        const r = rect(sel);
+        if (r) left = Math.max(left, r.right);
+      }
+      const body = document.querySelector('#ui-layer.sidebar-collapsed') ? rect('#btn-sidebar-toggle') : rect('#sidebar');
+      if (body) right = Math.min(right, body.left);
+    }
+    // 余白を少し取り、極端に狭い場合は全画面を使う
+    left += 8; right -= 8; top += 6; bottom -= 6;
+    if (right - left < 200) { left = 0; right = w; }
+    if (bottom - top < 160) { top = 0; bottom = h; }
+
+    const aspect = w / h;
+    const availW = right - left;
+    const availH = bottom - top;
+    const dW = (7.5 * w) / (availW * tanHalf * aspect);  // 駒台を含む横幅 ±7.5
+    const dH = (5.4 * h) / (availH * tanHalf);           // 駒台を含む縦幅 ±5.4
+    const dist = Math.max(12, dW, dH);
+
+    this.camera.aspect = aspect;
+    const offsetX = w / 2 - (left + right) / 2;
+    const offsetY = h / 2 - (top + bottom) / 2;
+    this.camera.setViewOffset(w, h, offsetX, offsetY, w, h);
+    this.camera.updateProjectionMatrix();
+    if (this.scene && this.scene.fog) this.scene.fog.density = 0.025 * 15.5 / dist;
+    if (this.controls) {
+      this.controls.minDistance = Math.min(6, dist * 0.5);
+      this.controls.maxDistance = Math.max(22, dist * 1.4);
+    }
+    return dist;
+  }
+
+  // UI の配置が変わったとき（棋譜欄の開閉・再生バーの表示など）にカメラを合わせ直す
+  refit() {
+    this.setCameraPerspective(this.perspective);
   }
 
   animate() {
@@ -580,7 +725,7 @@ export class Shogi3DView {
 
     // ハイライトリングの回転アニメーション
     this.highlightMarkers.forEach(ring => {
-      ring.rotation.z += 0.02;
+      if (ring.geometry.type === 'RingGeometry') ring.rotation.z += 0.02;
     });
 
     this.renderer.render(this.scene, this.camera);

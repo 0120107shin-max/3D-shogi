@@ -14,8 +14,9 @@ export class P2PManager {
   // PeerJS初期化
   init() {
     return new Promise((resolve, reject) => {
-      // PeerJS インスタンス作成 (PeerJS Cloud Server 利用)
-      this.peer = new Peer();
+      // PeerJS インスタンス作成 (既定は PeerJS Cloud Server)。
+      // 自前のシグナリングサーバーを使う場合は window.SHOGI_PEER_OPTIONS に PeerJS のオプションを設定する。
+      this.peer = window.SHOGI_PEER_OPTIONS ? new Peer(window.SHOGI_PEER_OPTIONS) : new Peer();
 
       this.peer.on('open', (id) => {
         this.peerId = id;
@@ -24,11 +25,16 @@ export class P2PManager {
       });
 
       // 他の相手からの接続をリスン (ホストモード)
+      // 接続の通知はデータチャネルが開いた時点（setupConnectionHandlers の 'open'）で1回だけ行う。
+      // ここで通知すると、まだ送信できない状態で対局設定を送ってしまい取りこぼす。
       this.peer.on('connection', (connection) => {
+        if (this.conn) {
+          connection.close(); // 対局中の部屋に3人目は入れない
+          return;
+        }
         this.conn = connection;
         this.isHost = true;
         this.setupConnectionHandlers();
-        if (this.onConnect) this.onConnect(true);
       });
 
       this.peer.on('error', (err) => {
@@ -52,7 +58,7 @@ export class P2PManager {
 
     this.conn.on('open', () => {
       console.log('P2P connection established with peer!');
-      if (this.onConnect) this.onConnect(false);
+      if (this.onConnect) this.onConnect(this.isHost);
     });
 
     this.conn.on('data', (data) => {
@@ -64,6 +70,13 @@ export class P2PManager {
       console.log('P2P Connection closed');
       if (this.onError) this.onError('接続が切断されました');
     });
+  }
+
+  // 任意データの送信
+  send(data) {
+    if (this.conn && this.conn.open) {
+      this.conn.send(data);
+    }
   }
 
   // 着手・指し手データの送信

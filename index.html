@@ -2,25 +2,33 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>漆黒の3D将棋 - Dark Shogi 3D</title>
+  <meta name="description" content="ブラウザだけで遊べる3D将棋。やねうら王（WebAssembly版）とのCPU対局、オンライン対戦、KIF棋譜の保存・読み込みに対応。">
+  <meta name="theme-color" content="#0a0a0c">
+  <meta property="og:title" content="漆黒の3D将棋">
+  <meta property="og:description" content="ブラウザだけで遊べる3D将棋。やねうら王とCPU対局、オンライン対戦、KIF棋譜に対応。">
+  <meta property="og:type" content="website">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M50 6 82 20 92 94H8L18 20Z' fill='%23d9b26a' stroke='%23111' stroke-width='4'/%3E%3Ctext x='50' y='72' font-size='46' text-anchor='middle' fill='%23111'%3E王%3C/text%3E%3C/svg%3E">
+
+  <!-- やねうら王(WebAssembly)は SharedArrayBuffer を使うため、COOP/COEP ヘッダーを Service Worker で付与する（GitHub Pages 対策） -->
+  <script src="coi-serviceworker.js"></script>
   
   <!-- Google Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Noto+Serif+JP:wght@600;900&family=Shippori+Mincho:wght@700;800&family=Yuji+Syuku&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Noto+Serif+JP:wght@600;900&family=Shippori+Mincho:wght@700;800&family=Yuji+Syuku&display=swap" rel="stylesheet" crossorigin="anonymous">
 
   
   <!-- CSS -->
   <link rel="stylesheet" href="styles.css">
   
-  <!-- External Libraries -->
-  <!-- Three.js for 3D Graphics -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-  <!-- OrbitControls for Three.js -->
-  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
-  <!-- PeerJS for WebRTC P2P Multiplayer -->
-  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <!-- External Libraries（クロスオリジン分離下でも読めるよう同一オリジンに同梱） -->
+  <!-- Three.js r128 for 3D Graphics (MIT) -->
+  <script src="vendor/three/three.min.js"></script>
+  <script src="vendor/three/OrbitControls.js"></script>
+  <!-- PeerJS 1.5.2 for WebRTC P2P Multiplayer (MIT) -->
+  <script src="vendor/peerjs/peerjs.min.js"></script>
 </head>
 <body>
   <!-- 3D Canvas Container -->
@@ -35,10 +43,11 @@
         <span class="sub">3D SHOGI</span>
       </div>
       <div class="header-actions">
-        <button id="btn-camera-cycle" class="btn btn-icon" title="視点切替（盤をダブルクリックでも可）">🧭 視点切替</button>
-        <button id="btn-camera-reset" class="btn btn-icon" title="視点復元">🎥 視点復元</button>
-        <button id="btn-camera-flip" class="btn btn-icon" title="視点反転">🔄 先後反転</button>
-        <button id="btn-new-game" class="btn btn-primary">➕ 対局設定</button>
+        <button id="btn-camera-cycle" class="btn btn-icon" aria-label="視点切替" title="視点切替（盤をダブルクリックでも可）"><span aria-hidden="true">🧭</span><span class="btn-label"> 視点切替</span></button>
+        <button id="btn-camera-reset" class="btn btn-icon" aria-label="視点復元" title="視点復元"><span aria-hidden="true">🎥</span><span class="btn-label"> 視点復元</span></button>
+        <button id="btn-camera-flip" class="btn btn-icon" aria-label="先後反転" title="視点反転"><span aria-hidden="true">🔄</span><span class="btn-label"> 先後反転</span></button>
+        <button id="btn-help" class="btn btn-icon" aria-label="遊び方" title="遊び方・このサイトについて"><span aria-hidden="true">❓</span><span class="btn-label"> 遊び方</span></button>
+        <button id="btn-new-game" class="btn btn-primary" aria-label="対局設定"><span aria-hidden="true">➕</span><span class="btn-label"> 対局設定</span></button>
       </div>
     </header>
 
@@ -75,17 +84,41 @@
       <button id="btn-sidebar-toggle" class="sidebar-toggle-btn" title="サイドバーを閉じる">»</button>
       <div class="sidebar-body">
         <div class="sidebar-header">
-          <h3>対局履歴 (棋譜)</h3>
-          <button id="btn-kifu-history" class="btn btn-icon-sm" title="保存された過去の棋譜を見る">📚 棋譜一覧</button>
+          <h3>棋譜</h3>
+          <div class="sidebar-header-actions">
+            <button id="btn-kifu-import" class="btn btn-icon-sm" title="KIF / SFEN を読み込んで再生">📥 読込</button>
+            <button id="btn-kifu-export" class="btn btn-icon-sm" title="KIF / SFEN を出力">📤 出力</button>
+            <button id="btn-kifu-history" class="btn btn-icon-sm" title="保存された過去の棋譜を見る">📚 一覧</button>
+          </div>
         </div>
+        <div id="eval-display" class="eval-display hidden"></div>
         <div id="kifu-list" class="kifu-container">
           <div class="kifu-entry placeholder">対局を開始してください</div>
         </div>
         <div class="sidebar-footer">
+          <button id="btn-undo" class="btn btn-secondary" disabled title="一手戻す（CPU戦では自分の手番まで戻す）">↩ 待った</button>
+          <button id="btn-declare" class="btn btn-secondary" disabled title="入玉宣言（24点法）">🏯 入玉宣言</button>
           <button id="btn-resign" class="btn btn-danger" disabled>🏳️ 投了</button>
         </div>
       </div>
     </aside>
+
+    <!-- 棋譜再生バー -->
+    <div id="replay-bar" class="replay-bar hidden">
+      <div class="replay-info" id="replay-info">棋譜再生</div>
+      <div class="replay-controls">
+        <button id="btn-replay-first" class="btn btn-icon-sm" title="初手へ">⏮</button>
+        <button id="btn-replay-prev" class="btn btn-icon-sm" title="1手戻る (←)">◀</button>
+        <input id="replay-slider" type="range" min="0" max="0" value="0" aria-label="手数">
+        <button id="btn-replay-next" class="btn btn-icon-sm" title="1手進む (→)">▶</button>
+        <button id="btn-replay-last" class="btn btn-icon-sm" title="最終手へ">⏭</button>
+      </div>
+      <div class="replay-actions">
+        <button id="btn-replay-play-from" class="btn btn-gold btn-icon-sm">この局面から対局</button>
+        <button id="btn-replay-export" class="btn btn-icon-sm">📤 出力</button>
+        <button id="btn-replay-close" class="btn btn-secondary btn-icon-sm">✕ 再生を終了</button>
+      </div>
+    </div>
   </div>
 
   <!-- Modals (Outside #ui-layer grid for full window overlay & clean pointer events) -->
@@ -108,10 +141,14 @@
       <div class="form-group mode-option cpu-only hidden">
         <label>CPU 難易度</label>
         <select id="cpu-level" class="input-select">
-          <option value="1">初級 (Lv.1)</option>
-          <option value="2" selected>中級 (Lv.2)</option>
-          <option value="3">上級 (Lv.3)</option>
+          <option value="1">Lv.1 入門</option>
+          <option value="2">Lv.2 初級</option>
+          <option value="3" selected>Lv.3 中級</option>
+          <option value="4">Lv.4 上級</option>
+          <option value="5">Lv.5 有段（1秒思考）</option>
+          <option value="6">Lv.6 最強（3秒思考）</option>
         </select>
+        <p id="engine-status" class="engine-status">CPU エンジン: やねうら王 (WebAssembly)</p>
       </div>
 
       <!-- Player Side Select (Hidden unless CPU selected) -->
@@ -132,8 +169,17 @@
         </div>
       </div>
 
+      <!-- 読み込んだ棋譜の途中局面から開始する場合 -->
+      <div id="start-position-box" class="form-group start-position-box hidden">
+        <label>開始局面</label>
+        <div class="start-position-row">
+          <span id="start-position-text"></span>
+          <button id="btn-clear-start-position" class="btn btn-icon-sm">解除</button>
+        </div>
+      </div>
+
       <!-- Handicap / Koma-ochi -->
-      <div class="form-group">
+      <div class="form-group" id="handicap-group">
         <label>駒落ちハンデ (上手の手合い)</label>
         <select id="handicap-select" class="input-select">
           <option value="hirate" selected>平手 (ハンデなし)</option>
@@ -179,8 +225,17 @@
       </div>
 
       <!-- Submit Button -->
+      <p class="credit-text">
+        CPU: <a href="https://github.com/yaneurao/YaneuraOu" target="_blank" rel="noopener">やねうら王</a>
+        (<a href="https://github.com/mizar/YaneuraOu.wasm" target="_blank" rel="noopener">WebAssembly版</a>, GPLv3)
+        ／ 評価関数: 水匠Petite ／ <a href="#" id="link-about">このサイトについて</a>
+      </p>
+
       <div class="modal-actions">
-        <button id="btn-setup-kifu-history" class="btn btn-secondary btn-link-left">📚 棋譜一覧</button>
+        <div class="btn-link-left setup-sub-actions">
+          <button id="btn-setup-kifu-history" class="btn btn-secondary">📚 棋譜一覧</button>
+          <button id="btn-setup-kifu-import" class="btn btn-secondary">📥 棋譜読込</button>
+        </div>
         <button id="btn-setup-cancel" class="btn btn-secondary hidden">← 戻る（対局を続ける）</button>
         <button id="btn-start-game" class="btn btn-gold btn-large">対局開始</button>
       </div>
@@ -224,6 +279,8 @@
       <p id="result-message">詰みです！先手の勝利。</p>
       <div class="modal-actions center">
         <button id="btn-result-close" class="btn btn-secondary">盤面を見る</button>
+        <button id="btn-result-undo" class="btn btn-secondary">↩ 待った</button>
+        <button id="btn-result-kif" class="btn btn-secondary">⬇ KIF保存</button>
         <button id="btn-result-restart" class="btn btn-gold">もう一度遊ぶ</button>
       </div>
     </div>
@@ -262,6 +319,8 @@
         <div id="kifu-history-detail-meta" class="kifu-history-meta"></div>
         <div id="kifu-history-detail-moves" class="kifu-container kifu-history-moves"></div>
         <div class="modal-actions">
+          <button id="btn-kifu-detail-replay" class="btn btn-gold">▶ 盤面で再生</button>
+          <button id="btn-kifu-detail-download" class="btn btn-secondary">⬇ KIF保存</button>
           <button id="btn-kifu-detail-delete" class="btn btn-danger">この棋譜を削除</button>
           <button id="btn-kifu-detail-back" class="btn btn-secondary">← 一覧へ戻る</button>
         </div>
@@ -269,10 +328,92 @@
     </div>
   </div>
 
+  <!-- Modal: 棋譜出力 -->
+  <div id="modal-export" class="modal">
+    <div class="modal-content glass-panel kifu-history-panel">
+      <h3>棋譜を出力</h3>
+      <div class="form-group">
+        <label>KIF 形式</label>
+        <textarea id="export-kif" class="input-text kifu-textarea" readonly></textarea>
+      </div>
+      <div class="form-group">
+        <label>現在の局面 (SFEN)</label>
+        <input id="export-sfen" class="input-text" readonly>
+      </div>
+      <div class="form-group">
+        <label>USI position コマンド（将棋所・ShogiGUI 等の検討用）</label>
+        <input id="export-usi" class="input-text" readonly>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-export-download" class="btn btn-gold btn-link-left">⬇ KIFファイル保存</button>
+        <button id="btn-export-copy-kif" class="btn btn-secondary">KIFをコピー</button>
+        <button id="btn-export-copy-sfen" class="btn btn-secondary">SFENをコピー</button>
+        <button id="btn-export-copy-usi" class="btn btn-secondary">USIをコピー</button>
+        <button id="btn-export-close" class="btn btn-secondary">閉じる</button>
+      </div>
+    </div>
   </div>
 
+  <!-- Modal: 棋譜読込 -->
+  <div id="modal-import" class="modal">
+    <div class="modal-content glass-panel kifu-history-panel">
+      <h3>棋譜を読み込む</h3>
+      <p class="sub-text">KIF ファイル（Shift_JIS / UTF-8）、KIF テキスト、SFEN、または USI の position 文字列を読み込めます。</p>
+      <div class="form-group">
+        <label>ファイルから</label>
+        <input id="import-file" type="file" accept=".kif,.kifu,.txt,.sfen,.usi" class="input-text">
+      </div>
+      <div class="form-group">
+        <label>テキストを貼り付け</label>
+        <textarea id="import-text" class="input-text kifu-textarea" placeholder="例: position startpos moves 7g7f 3c3d&#10;または KIF 形式の棋譜"></textarea>
+      </div>
+      <p id="import-error" class="error-text hidden"></p>
+      <div class="modal-actions">
+        <button id="btn-import-close" class="btn btn-secondary btn-link-left">閉じる</button>
+        <button id="btn-import-load" class="btn btn-gold">読み込んで再生</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: このサイトについて -->
+  <div id="modal-about" class="modal">
+    <div class="modal-content glass-panel kifu-history-panel about-panel">
+      <h3>このサイトについて</h3>
+      <p>ブラウザだけで遊べる 3D 将棋です。インストール不要で、CPU 対局・同じ端末での対人戦・オンライン対戦（P2P）ができます。</p>
+      <h4>ルール</h4>
+      <ul>
+        <li>二歩・打ち歩詰め・行き所のない駒・王手放置は指せません。</li>
+        <li>同一局面が4回現れると千日手（引き分け）。一方が王手をかけ続けていた場合はその側の反則負けです。</li>
+        <li>入玉宣言は 24点法：玉が敵陣にいて王手されておらず、敵陣の自駒が10枚以上のとき宣言できます。大駒5点・小駒1点で31点以上なら勝ち、24〜30点なら持将棋（引き分け）。駒落ちでは上手の落とした駒を上手の点に加えます。</li>
+        <li>「待った」は CPU 戦と対人（ローカル）戦で使えます。オンライン対戦では使えません。</li>
+      </ul>
+      <h4>CPU エンジン</h4>
+      <p>
+        CPU には将棋ソフト「<a href="https://github.com/yaneurao/YaneuraOu" target="_blank" rel="noopener">やねうら王</a>」の
+        WebAssembly 版（<a href="https://github.com/mizar/YaneuraOu.wasm" target="_blank" rel="noopener">YaneuraOu.wasm</a>、
+        <a href="https://www.npmjs.com/package/@mizarjp/yaneuraou.k-p" target="_blank" rel="noopener">@mizarjp/yaneuraou.k-p</a> 7.6.3）を使い、
+        評価関数は内蔵の「水匠Petite」（たややん氏）です。お使いのブラウザ内で動作し、局面がサーバーに送られることはありません。
+        エンジンは GNU GPL v3 で配布されており、ライセンス全文は <a href="vendor/yaneuraou/LICENSE.md" target="_blank" rel="noopener">こちら</a>、
+        ソースコードは上記リンク先で入手できます。
+      </p>
+      <p>
+        エンジンを動かすには WebAssembly のスレッドと SIMD が必要です（最新の Chrome / Edge / Firefox / Safari 16.4 以降）。
+        非対応の環境では、内蔵の簡易 AI が代わりに指します。
+      </p>
+      <h4>使用ライブラリ</h4>
+      <p>Three.js (MIT) / PeerJS (MIT) / coi-serviceworker (MIT)</p>
+      <div class="modal-actions">
+        <button id="btn-about-close" class="btn btn-secondary">閉じる</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <noscript><p class="noscript">このサイトを利用するには JavaScript を有効にしてください。</p></noscript>
+
   <!-- Scripts -->
-  <script type="module" src="js/app.js?v=20260724_sidebar1"></script>
+  <script type="module" src="js/app.js?v=20261005_engine1"></script>
 
 
 </body>

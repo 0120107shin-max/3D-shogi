@@ -1,0 +1,10 @@
+{
+  "name": "3d-shogi",
+  "private": true,
+  "description": "漆黒の3D将棋 - ブラウザで遊べる3D将棋（やねうら王 WebAssembly 版で CPU 対局）",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "start": "python3 -m http.server 8000"
+  }
+}
